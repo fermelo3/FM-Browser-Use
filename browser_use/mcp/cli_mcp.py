@@ -322,13 +322,6 @@ def _capture(buffer: StringIO):
 		_cell.buffer = None
 
 
-def _is_login_failure(text: str) -> bool:
-	return (
-		text.startswith(('Browser Use Cloud login failed:', 'Could not start Browser Use Cloud login:'))
-		or 'wins over a stored key' in text
-	)
-
-
 def _open_url(url: str) -> bool:
 	"""Open url in the user's browser without letting a child process write to stdout (the MCP channel)."""
 	command = {'darwin': ['open', url], 'linux': ['xdg-open', url]}.get(sys.platform)
@@ -365,7 +358,7 @@ class _Login:
 		try:
 			auth.complete_browser_auth(self.start)
 		except Exception as e:  # AuthError: denied, timed out, exchange failed
-			self.error = str(e)
+			self.error = str(e) or type(e).__name__
 
 
 def _refusing(fn: Any, rules: DomainRules) -> Any:
@@ -561,8 +554,8 @@ class CLIMCPServer:
 				content: list[types.ContentBlock] = [types.ImageContent(type='image', data=png, mime_type='image/png')]
 				return types.CallToolResult(content=content)
 			if name == 'browser_login':
-				text = await asyncio.to_thread(self._sign_in, bool(arguments.get('force', False)))
-				return types.CallToolResult(content=[types.TextContent(type='text', text=text)], is_error=_is_login_failure(text))
+				text, failed = await asyncio.to_thread(self._sign_in, bool(arguments.get('force', False)))
+				return types.CallToolResult(content=[types.TextContent(type='text', text=text)], is_error=failed)
 			if name == 'browser_feedback':
 				text, failed = feedback.mcp_call(arguments)
 				return types.CallToolResult(content=[types.TextContent(type='text', text=text)], is_error=failed)
@@ -811,8 +804,8 @@ class CLIMCPServer:
 			text += f'. No local Chrome to use? {hint[0].upper()}{hint[1:]}'
 		return f'Error: {text}'
 
-	def _sign_in(self, force: bool, wait: float = LOGIN_WAIT_SECONDS) -> str:
-		"""Start (or keep waiting on) one browser login. The key never appears in the result."""
+	def _sign_in(self, force: bool, wait: float = LOGIN_WAIT_SECONDS) -> tuple[str, bool]:
+		"""Start (or keep waiting on) one browser login. Returns (message, whether it failed). The key never appears in the result."""
 		from browser_harness import auth
 
 		with self._login_lock:
@@ -823,31 +816,36 @@ class CLIMCPServer:
 				try:
 					status = auth.auth_status()
 				except Exception as e:  # an unreadable auth file
-					status = {'status': 'error', 'reason': str(e)}
+					status = {'status': 'error', 'reason': str(e) or type(e).__name__}
 				if status.get('source') == 'env':
 					if not force:
-						return f'Signed in to Browser Use Cloud (key from BROWSER_USE_API_KEY). {LOGIN_NEXT}'
-					return 'BROWSER_USE_API_KEY is set for this server and wins over a stored key: fix or unset it in the MCP config.'
+						return f'Signed in to Browser Use Cloud (key from BROWSER_USE_API_KEY). {LOGIN_NEXT}', False
+					return (
+						'BROWSER_USE_API_KEY is set for this server and wins over a stored key: fix or unset it in the MCP config.',
+						True,
+					)
 				if status.get('status') == 'authenticated' and not force:
-					return f'Signed in to Browser Use Cloud (key from {status.get("path")}). {LOGIN_NEXT}'
+					return f'Signed in to Browser Use Cloud (key from {status.get("path")}). {LOGIN_NEXT}', False
 				try:
 					login = self._login = _Login()
 				except Exception as e:  # network error, auth server refused the request
-					return f'Could not start Browser Use Cloud login: {e}'
+					err = str(e) or type(e).__name__
+					return f'Could not start Browser Use Cloud login: {err}', True
 		login.thread.join(wait)
 		if login.thread.is_alive():
 			how = 'in the browser tab that just opened' if login.opened else 'by opening this URL in a browser'
 			return (
 				f'Waiting for the user to approve Browser Use {how}: {login.start.auth_url}\n'
 				'Call browser_login again after approving. No browser on this machine? Run `browser-use login --device-code` '
-				'in a terminal instead.'
+				'in a terminal instead.',
+				False,
 			)
 		with self._login_lock:
 			if self._login is login:
 				self._login = None
 		if login.error:
-			return f'Browser Use Cloud login failed: {login.error}. Call browser_login to try again.'
-		return f'Signed in to Browser Use Cloud. {LOGIN_NEXT}'
+			return f'Browser Use Cloud login failed: {login.error}. Call browser_login to try again.', True
+		return f'Signed in to Browser Use Cloud. {LOGIN_NEXT}', False
 
 	def _screenshot(self, full: bool, max_dim: int | None) -> str:
 		buffer = StringIO()

@@ -225,8 +225,8 @@ class MCPToolCallEvent(BaseTelemetryEvent):
 	tool_name: str  # browser_exec, browser_screenshot, browser_login, browser_feedback, a 0.x tool name, or 'invalid'
 	duration_seconds: float
 	ok: bool  # the result was not an error
-	# exception class (as in agent_event's cell_error_types), CancelledError for a cancelled call; invalid_arguments or
-	# unknown_tool for an error result without an exception
+	# exception class (as in agent_event's cell_error_types), CancelledError for a cancelled call; invalid_arguments,
+	# login_failed or unknown_tool for an error result without an exception
 	error_type: str | None
 	server: str  # cli-mcp | mcp
 	browser: str  # chrome (the user's) | chromium (--mcp's own) | cloud
