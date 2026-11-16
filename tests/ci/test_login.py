@@ -378,21 +378,24 @@ def test_mcp_browser_login_finishes_across_calls_and_never_returns_the_key(store
 	output = mcp._execute('start_remote_daemon("browser-use-tests-login")')[0]
 	assert cli_mcp.LOGIN_HINT in output
 
-	first = mcp._sign_in(force=False, wait=0.2)
+	first, failed = mcp._sign_in(force=False, wait=0.2)
+	assert not failed
 	assert 'Waiting for the user to approve' in first and 'call browser_login again' in first.lower()
 	assert opened == [f'{server.url}/device/authorize?state={server.starts[0]["state"]}'] and opened[0] in first
 	assert server.starts[0]['device_name'] == 'browser-use-mcp'
 
-	assert mcp._sign_in(force=False, wait=0.2) == first  # still pending: no second login is started
+	assert mcp._sign_in(force=False, wait=0.2) == (first, False)  # still pending: no second login is started
 	assert len(server.starts) == 1
 
 	server.approve()
-	done = mcp._sign_in(force=False, wait=10)
+	done, failed = mcp._sign_in(force=False, wait=10)
+	assert not failed
 	assert done.startswith('Signed in to Browser Use Cloud')
 	assert json.loads(store.read_text())['browser_use']['api_key'] == FAKE_KEY
 	assert FAKE_KEY not in first + done
 
-	again = mcp._sign_in(force=False, wait=0.2)  # already signed in: no new login
+	again, failed = mcp._sign_in(force=False, wait=0.2)  # already signed in: no new login
+	assert not failed
 	assert again.startswith('Signed in') and str(store) in again and len(server.starts) == 1
 
 
@@ -402,11 +405,13 @@ def test_mcp_browser_login_reports_a_denied_approval(store, monkeypatch, auth_se
 	server = auth_server(auto_approve=False)
 	monkeypatch.setattr(cli_mcp, '_open_url', lambda url: False)
 	mcp = cli_mcp.CLIMCPServer()
-	pending = mcp._sign_in(force=False, wait=0.2)
+	pending, failed = mcp._sign_in(force=False, wait=0.2)
+	assert not failed
 	assert 'by opening this URL in a browser' in pending
 	start = server.starts[0]
 	urllib.request.urlopen(f'{start["redirect_uri"]}?error=access_denied&state={start["state"]}', timeout=10).read()
-	result = mcp._sign_in(force=False, wait=10)
+	result, failed = mcp._sign_in(force=False, wait=10)
+	assert failed
 	assert result.startswith('Browser Use Cloud login failed: auth failed: access_denied')
 	assert not store.exists()
 
@@ -416,8 +421,10 @@ def test_mcp_browser_login_with_an_env_key(store, monkeypatch):
 
 	monkeypatch.setenv('BROWSER_USE_API_KEY', 'fake-env-key')
 	mcp = cli_mcp.CLIMCPServer()
-	assert 'key from BROWSER_USE_API_KEY' in mcp._sign_in(force=False, wait=0)
-	assert 'BROWSER_USE_API_KEY is set' in mcp._sign_in(force=True, wait=0)  # a new stored key would not be used
+	msg1, failed1 = mcp._sign_in(force=False, wait=0)
+	assert not failed1 and 'key from BROWSER_USE_API_KEY' in msg1
+	msg2, failed2 = mcp._sign_in(force=True, wait=0)
+	assert failed2 and 'BROWSER_USE_API_KEY is set' in msg2  # a new stored key would not be used
 
 
 async def test_mcp_lists_browser_login():
@@ -570,12 +577,61 @@ def test_a_callback_with_the_wrong_state_neither_completes_nor_aborts_the_login(
 	server = auth_server(auto_approve=False)
 	monkeypatch.setattr(cli_mcp, '_open_url', lambda url: True)
 	mcp = cli_mcp.CLIMCPServer()
-	assert 'Waiting for the user to approve' in mcp._sign_in(force=False, wait=0.2)
+	pending, failed = mcp._sign_in(force=False, wait=0.2)
+	assert not failed and 'Waiting for the user to approve' in pending
 	start = server.starts[0]
 	with pytest.raises(urllib.error.HTTPError) as raised:
 		urllib.request.urlopen(f'{start["redirect_uri"]}?code=stolen&state=wrong', timeout=10)
 	assert raised.value.code == 400 and b'login complete' not in raised.value.read()
 
 	server.approve()  # the real approval still finishes the same login
-	assert mcp._sign_in(force=False, wait=10).startswith('Signed in to Browser Use Cloud')
+	done, failed = mcp._sign_in(force=False, wait=10)
+	assert not failed and done.startswith('Signed in to Browser Use Cloud')
 	assert json.loads(store.read_text())['browser_use']['api_key'] == FAKE_KEY
+
+
+@pytest.mark.asyncio
+async def test_mcp_browser_login_tool_reports_is_error_accurately(monkeypatch):
+	import mcp.types as types
+
+	from browser_use.mcp import cli_mcp
+
+	server = cli_mcp.CLIMCPServer()
+	handler = server.server.get_request_handler('tools/call').handler
+
+	# Success case: is_error must be False
+	monkeypatch.setattr(server, '_sign_in', lambda force: ('Signed in to Browser Use Cloud.', False))
+	res = await handler(None, types.CallToolRequestParams(name='browser_login', arguments={}))
+	assert not res.is_error
+	assert 'Signed in to Browser Use Cloud' in res.content[0].text
+
+	# Pending approval case: is_error must be False
+	monkeypatch.setattr(server, '_sign_in', lambda force: ('Waiting for the user to approve Browser Use...', False))
+	res = await handler(None, types.CallToolRequestParams(name='browser_login', arguments={}))
+	assert not res.is_error
+	assert 'Waiting for the user' in res.content[0].text
+
+	# Failure cases: is_error must be True
+	monkeypatch.setattr(
+		server,
+		'_sign_in',
+		lambda force: ('Browser Use Cloud login failed: invalid_grant. Call browser_login to try again.', True),
+	)
+	res = await handler(None, types.CallToolRequestParams(name='browser_login', arguments={}))
+	assert res.is_error
+	assert 'login failed' in res.content[0].text
+
+	monkeypatch.setattr(server, '_sign_in', lambda force: ('Could not start Browser Use Cloud login: network timeout', True))
+	res = await handler(None, types.CallToolRequestParams(name='browser_login', arguments={}))
+	assert res.is_error
+
+	monkeypatch.setattr(
+		server,
+		'_sign_in',
+		lambda force: (
+			'BROWSER_USE_API_KEY is set for this server and wins over a stored key: fix or unset it in the MCP config.',
+			True,
+		),
+	)
+	res = await handler(None, types.CallToolRequestParams(name='browser_login', arguments={'force': True}))
+	assert res.is_error
