@@ -2,8 +2,8 @@ from abc import ABC, abstractmethod
 from dataclasses import asdict, dataclass, field
 from typing import TYPE_CHECKING, Any
 
-SCHEMA_VERSION = 5  # 2: no task, result, code, typed text, URLs or error messages; 3: timings, per-step arrays;
-# 4: urls_visited, error_messages, final_result; 5: judge, judge_context, judgement
+SCHEMA_VERSION = 6  # 2: no task, result, code, typed text, URLs or error messages; 3: timings, per-step arrays;
+# 4: urls_visited, error_messages, final_result; 5: judge, judge_context, judgement; 6: anti-bot blocks
 
 
 @dataclass
@@ -212,6 +212,12 @@ class AgentTelemetryEvent(BaseTelemetryEvent):
 	# bot_block_or_captcha_detected, gotchas (at most 5; each text scrubbed, 300 chars), cost_usd; None when not judged
 	judgement: dict[str, Any] | None = None
 	feedback_count: int = 0  # report_issue() calls sent as library_feedback during the run
+	# --- schema 6 --- anti-bot (repl/antibot.py): the vendor enum, outcomes and hostnames, never paths or page text
+	blocks: list[dict[str, Any]] = field(default_factory=list)  # {vendor, host, outcome, challenge, count, status (highest)}, 20
+	blocked_label: str = 'clean'  # blocked | got_through (judged a success) | judge_only (judge saw one, no rule) | clean
+	antibot_passed: dict[str, int] = field(default_factory=dict)  # vendor -> challenged visits that got through
+	antibot_seen: dict[str, int] = field(default_factory=dict)  # vendor -> visits whose headers showed it (presence)
+	antibot_detector: int = 0  # antibot.DETECTOR_VERSION: a rule change is not a change in block rate
 
 	name: str = 'agent_event'
 

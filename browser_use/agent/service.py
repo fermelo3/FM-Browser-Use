@@ -848,6 +848,7 @@ class Agent:
 				MAX_URL,
 				MAX_URLS,
 				RunStats,
+				antibot_fields,
 				download_ext,
 				judged,
 				scrub,
@@ -974,6 +975,7 @@ class Agent:
 					error_messages=[e for e in dict.fromkeys(errors) if e][:MAX_ERRORS],
 					final_result=scrub(final, forms, MAX_RESULT, tasks, stats.typed) or None,
 					judgement=judged(judgement, judge_cost, lambda text: scrub(text, forms, MAX_ERROR, tasks, stats.typed)),
+					**antibot_fields(stats, judgement, keys),
 				)
 				return event.properties
 
